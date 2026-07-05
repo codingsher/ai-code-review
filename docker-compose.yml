@@ -30,6 +30,7 @@ services:
     build: ./api
     command: alembic upgrade head
     environment:
+      PYTHONPATH: /srv
       MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/codereview
     depends_on: [postgres]
 
