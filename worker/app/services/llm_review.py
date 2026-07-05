@@ -1,9 +1,8 @@
 """LLM review engine.
 
-Calls the configured LLM provider, validates output against FindingList schema.
+Calls Anthropic Messages API, validates output against FindingList schema.
 Retries once on invalid JSON; drops low-confidence findings.
 """
-import asyncio
 import json
 import logging
 import os
@@ -26,22 +25,6 @@ MAX_TOKENS = 4096
 
 
 async def _call_llm(prompt: str) -> str:
-    last_exc: Exception | None = None
-    for attempt in range(4):
-        try:
-            return await _call_llm_once(prompt)
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (429, 500, 502, 503, 529):
-                last_exc = e
-                wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
-                logger.warning("LLM %s, retry in %ss", e.response.status_code, wait)
-                await asyncio.sleep(wait)
-            else:
-                raise
-    raise last_exc
-
-
-async def _call_llm_once(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=120) as client:
         if LLM_PROVIDER == "anthropic":
             resp = await client.post(
@@ -74,7 +57,7 @@ async def run_llm_review(
     repo_dir: str, job: dict, files: list[str], static_findings: list[dict]
 ) -> list[Finding]:
     if not API_KEY:
-        logger.warning("LLM_API_KEY not set; skipping LLM review")
+        logger.warning("ANTHROPIC_API_KEY not set; skipping LLM review")
         return []
 
     prompt = await build_review_prompt(repo_dir, job, files, static_findings)
