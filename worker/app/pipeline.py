@@ -1,4 +1,4 @@
-"""Review pipeline: clone -> diff -> static analysis -> (Phase 2: LLM) -> GitHub comment."""
+"""Review pipeline: clone -> diff -> static analysis -> LLM -> GitHub comment."""
 import asyncio
 import logging
 import shutil
@@ -44,7 +44,11 @@ async def run_review_pipeline(job: dict) -> dict:
             static_findings += await run_ruff(repo_dir, py_files)
             static_findings += await run_bandit(repo_dir, py_files)
 
-        ai_findings = await run_llm_review(repo_dir, job, files, static_findings)
+        ai_findings = []
+        if py_files:
+            ai_findings = await run_llm_review(repo_dir, job, py_files, static_findings)
+        else:
+            logger.info("PR #%s: no reviewable files, skipping LLM", job["pr_number"])
 
         static_report = format_report(static_findings) if static_findings else ""
         if ai_findings or static_findings:
