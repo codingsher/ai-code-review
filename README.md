@@ -1,45 +1,79 @@
 # AI Code Review Platform
 
-Cloud-native platform that automatically reviews GitHub Pull Requests using static analysis + LLMs.
+A platform that reviews GitHub pull requests automatically. When a PR opens, it clones the repo, runs static analysis, sends the diff with full context to an LLM, and posts inline review comments back on the PR within seconds.
 
-## Architecture (Phase 1)
+## How it works
 
-```
-GitHub PR event ──> API (FastAPI, HMAC-verified webhook)
-                        │ XADD
-                        ▼
-                 Redis Streams (consumer group, DLQ, XAUTOCLAIM recovery)
-                        │
-                        ▼
-                 Worker (stateless, horizontally scalable)
-                   clone → diff → Ruff/Bandit → report → PR comment
+```bash
+GitHub PR event -> API (FastAPI, HMAC-verified webhook)
+|
+v
+Redis Streams (consumer groups, DLQ, crash recovery)
+|
+v
+Worker (stateless, horizontally scalable)
+clone -> diff -> Ruff/Bandit -> LLM review -> inline PR comments
+|
+v
+PostgreSQL -> React dashboard (history, metrics)
 ```
 
 ## Quick start
 
 ```bash
-cp .env.example .env   # fill in GitHub OAuth app + webhook secret + PAT
-docker compose up --build
+cp .env.example .env   # fill in GitHub OAuth app, webhook secret, PAT, LLM key
+docker compose up -d --build
 ```
 
-Expose the webhook locally with `ngrok http 8000`, point a GitHub webhook
-(pull_request events, secret = GITHUB_WEBHOOK_SECRET) at
-`https://<ngrok>/api/webhooks/github`, and open a PR.
+Point a GitHub webhook (pull_request events, content type application/json, secret matching GITHUB_WEBHOOK_SECRET) at:
+```bash
+http://<your-host>:8000/api/webhooks/github
+```
+
+For local testing, expose port 8000 with ngrok. On a server with a public IP, use the IP directly. Then open a PR with a code change and watch the review land.
+
+Dashboard runs at port 5173. API docs at /api/docs.
+
+## LLM provider
+
+Any OpenAI-compatible endpoint works. Configure in .env:
+
+```bash
+LLM_PROVIDER=gemini
+LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+LLM_API_KEY=your-key
+LLM_MODEL=gemini-2.5-flash-lite
+```
+
+Groq, OpenRouter, and Ollama work the same way with their base URLs. Anthropic is supported natively with LLM_PROVIDER=anthropic.
 
 ## Design decisions
 
-- **Redis Streams over lists/RQ**: consumer groups give at-least-once delivery,
-  per-consumer pending lists, and `XAUTOCLAIM` for crash recovery — a DLQ and
-  retry counter complete the reliability story without extra infra.
-- **Ack-after-success**: workers only `XACK` after the full pipeline completes;
-  crashes mid-job are reclaimed after 5 min idle.
-- **Webhook fast path**: signature verify + enqueue only; all heavy work is async.
-- **Blobless clone** (`--filter=blob:none`): fast clones of large repos.
+- Redis Streams over lists or RQ: consumer groups give at-least-once delivery, per-consumer pending lists, and XAUTOCLAIM for crash recovery. A dead letter queue and retry counter complete the reliability story without extra infrastructure.
+- Ack after success: workers only acknowledge a job after the full pipeline completes. If a worker dies mid-review, the job gets reclaimed and retried.
+- Webhook fast path: the API only verifies the signature and enqueues. All heavy work happens asynchronously in workers.
+- Blobless clones keep large repos fast to fetch.
+- The LLM is skipped entirely when a PR has no reviewable files, and rate limits are handled with exponential backoff. Wasted model calls cost real quota.
+- LLM output is schema validated. Findings that fail validation or fall below the confidence threshold are dropped rather than posted.
 
-## Roadmap
+## Stack
 
-- [x] Phase 1: webhook → queue → worker → static analysis → PR comment
-- [x] Phase 2: LLM review engine (context-rich prompts, structured JSON findings, inline PR reviews)
-- [x] Phase 3: PostgreSQL persistence (SQLAlchemy async + Alembic), review history & metrics API, worker result callback
-- [x] Phase 4: React + TypeScript dashboard (Vite, Tailwind v4, React Query, Recharts; nginx-served)
-- [x] Phase 5: Kubernetes (deployments, HPA, probes, ingress, StatefulSet PG), Prometheus/Grafana, GitHub Actions CI/CD (lint→test→scan→build→deploy→smoke)
+FastAPI, Redis Streams, PostgreSQL with SQLAlchemy and Alembic, React with TypeScript and Recharts, Ruff and Bandit for static analysis, Docker Compose for local development, Kubernetes manifests with HPAs and Prometheus/Grafana for production, GitHub Actions for CI/CD.
+
+## Running tests
+
+```bash
+cd api && pytest tests
+cd worker && pytest tests
+```
+
+## Deploying to Kubernetes
+
+Create the secret described in deploy/k8s/02-secrets.yaml, replace OWNER in the image names, then:
+
+```bash
+kubectl apply -f deploy/k8s/
+```
+
+The GitHub Actions pipeline does this automatically on push to main, given a KUBECONFIG repo secret.
+
